@@ -1,6 +1,8 @@
 import sqlite3
 import typing
 
+from timetable_loader import BaseTimetableLoader
+
 
 def add_new_user(cursor: sqlite3.Cursor, user_id, group_id: int):
     cursor.execute("""
@@ -14,9 +16,9 @@ def delete_timetable_for_group(cursor: sqlite3.Cursor, group_id: int):
     """, (group_id, ))
 
 
-def upload_timetable_for_group(cursor: sqlite3.Cursor, group_id: int, timetable: typing.Iterable):
+def upload_timetable_for_group(cursor: sqlite3.Cursor, timetable: BaseTimetableLoader):
     cursor.executemany(f"""
-        INSERT INTO timetable VALUES ({group_id}, ?, ?, ?, ?, ?)
+        INSERT INTO timetable VALUES (?, ?, ?, ?, ?, ?)
     """, timetable)
 
 

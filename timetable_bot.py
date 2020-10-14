@@ -6,8 +6,17 @@ import datetime
 import calendar
 
 from aiogram import Bot, Dispatcher, executor, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.utils.exceptions import MessageTextIsEmpty
 
-from sql_queries import get_timetable_for_group_and_day
+from sql_queries import get_timetable_for_group_and_day, upload_timetable_for_group
+from timetable_loader import get_loader
+
+
+class UploadForm(StatesGroup):
+    upload_file = State()
 
 
 class TimeTableBot:
@@ -15,7 +24,8 @@ class TimeTableBot:
     def __init__(self, config: typing.Dict):
         self.config = config
         self.bot = Bot(config["token"])
-        self.dp = Dispatcher(bot=self.bot)
+        self.storage = MemoryStorage()
+        self.dp = Dispatcher(bot=self.bot, storage=self.storage)
         self.bd_conn = sqlite3.connect(config["db"])
         self.cursor = self.bd_conn.cursor()
 
@@ -26,6 +36,8 @@ class TimeTableBot:
         self.dp.register_message_handler(self.welcome_user, commands=['start', 'help'])
         self.dp.register_message_handler(self.cmd_today, commands=['today'])
         self.dp.register_message_handler(self.cmd_weekday, commands=calendar.day_name)
+        self.dp.register_message_handler(self.cmd_upload_timetable, commands=['upload'], state="*")
+        self.dp.register_message_handler(self.handle_file, content_types=['document'], state=UploadForm.upload_file)
 
     def on_shutdown(self):
         logging.info('Connection to database is closed')
@@ -42,7 +54,10 @@ class TimeTableBot:
         reply_text = "\n".join(
             [" | ".join(row) for row in records]
         )
-        await message.answer(reply_text)
+        try:
+            await message.answer(reply_text)
+        except MessageTextIsEmpty:
+            await message.answer('You are free!')
 
     async def cmd_weekday(self, message: types.Message):
         day = message.get_command(pure=True)
@@ -50,5 +65,27 @@ class TimeTableBot:
         reply_text = "\n".join(
             [" | ".join(row) for row in records]
         )
-        await message.answer(reply_text)
+        try:
+            await message.answer(reply_text)
+        except MessageTextIsEmpty:
+            await message.answer('You are free!')
 
+    async def cmd_upload_timetable(self, message: types.Message):
+        await UploadForm.upload_file.set()
+        await message.answer('Waiting for file')
+
+    async def handle_file(self, message: types.Message):
+        await UploadForm.next()
+        available_extensions = {
+            '.csv'
+        }
+        file_id = message.document.file_id
+        root, ext = os.path.splitext(message.document.file_name)
+        if ext not in available_extensions:
+            await message.answer('Unsupported extension: "%s"' % ext)
+        else:
+            tmpfile = 'tmp' + ext
+            await self.bot.download_file_by_id(file_id, tmpfile)
+            loader = get_loader(ext)
+            upload_timetable_for_group(self.cursor, loader(path_to_file=tmpfile, group_id=0))
+            os.remove(tmpfile)
