@@ -1,0 +1,4 @@
+{
+  "token": "token for your bot",
+  "db": "path/to/database.db"
+}
