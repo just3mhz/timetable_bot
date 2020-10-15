@@ -76,16 +76,13 @@ class TimeTableBot:
 
     async def handle_file(self, message: types.Message):
         await UploadForm.next()
-        available_extensions = {
-            '.csv'
-        }
         file_id = message.document.file_id
         root, ext = os.path.splitext(message.document.file_name)
-        if ext not in available_extensions:
+        loader = get_loader(ext)
+        if loader is None:
             await message.answer('Unsupported extension: "%s"' % ext)
         else:
-            tmpfile = 'tmp' + ext
-            await self.bot.download_file_by_id(file_id, tmpfile)
-            loader = get_loader(ext)
-            upload_timetable_for_group(self.cursor, loader(path_to_file=tmpfile, group_id=0))
-            os.remove(tmpfile)
+            tmp_file = 'tmp' + ext
+            await self.bot.download_file_by_id(file_id, tmp_file)
+            upload_timetable_for_group(self.cursor, loader(path_to_file=tmp_file, group_id=0))
+            os.remove(tmp_file)
