@@ -1,4 +1,5 @@
 {
-  "token": "token for your bot",
-  "db": "path/to/database.db"
+  "token": "XXX",
+  "db_uri": "sqlite:///:memory:",
+  "columns": "weekday,time,subject,lecturer,place"
 }

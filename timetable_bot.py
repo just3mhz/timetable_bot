@@ -1,81 +1,94 @@
 import os
-import logging
 import typing
-import sqlite3
 import datetime
 import calendar
 
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.utils.exceptions import MessageTextIsEmpty
 
-from sql_queries import get_timetable_for_group_and_day, upload_timetable_for_group
+from timetable_base import Database, User, TimetableRecord
 from timetable_loader import get_loader
 
 
-class UploadForm(StatesGroup):
-    upload_file = State()
+def run_bot(config: typing.Dict):
+    bot_backend = TimeTableBot(config)
+    bot_backend.setup_handlers()
+    bot_backend.start_polling()
+    bot_backend.on_shutdown()
 
 
 class TimeTableBot:
 
+    HELP_MESSAGE = """
+/start     - Start bot
+/help      - Show help message
+/today     - Show timetable for today
+/[weekday] - Show timetable for [weekday]
+[document] - Upload new timetable
+"""
+
     def __init__(self, config: typing.Dict):
         self.config = config
-        self.bot = Bot(config["token"])
-        self.storage = MemoryStorage()
-        self.dp = Dispatcher(bot=self.bot, storage=self.storage)
-        self.bd_conn = sqlite3.connect(config["db"])
-        self.cursor = self.bd_conn.cursor()
+        self.bot = Bot(config['token'])
+        self.dp = Dispatcher(bot=self.bot)
+        self.db = Database(url=config['db_uri'])
+        self.scheme = set(config['columns'].split(','))
 
     def start_polling(self):
         executor.start_polling(self.dp)
 
     def setup_handlers(self):
-        self.dp.register_message_handler(self.welcome_user, commands=['start', 'help'])
+        self.dp.register_message_handler(self.cmd_start, commands=['start'])
+        self.dp.register_message_handler(self.cmd_help, commands=['help'])
         self.dp.register_message_handler(self.cmd_today, commands=['today'])
         self.dp.register_message_handler(self.cmd_weekday, commands=calendar.day_name)
-        self.dp.register_message_handler(self.cmd_upload_timetable, commands=['upload'], state="*")
-        self.dp.register_message_handler(self.handle_file, content_types=['document'], state=UploadForm.upload_file)
+        self.dp.register_message_handler(self.handle_file, content_types=['document'])
 
     def on_shutdown(self):
-        logging.info('Connection to database is closed')
-        self.bd_conn.commit()
-        self.bd_conn.close()
+        pass
 
-    async def welcome_user(self, message: types.Message):
-        await message.answer('Hello, user')
+    def _user_is_registered(self, user_id):
+        return self.db.session.query(User).get(user_id) is not None
+
+    def _get_timetable_for_day(self, user_id, weekday):
+        timetable_for_weekday = []
+        for row in self.db.session.query(TimetableRecord).filter_by(user_id=user_id, weekday=weekday):
+            timetable_for_weekday.append((row.weekday, row.time, row.subject, row.lecturer, row.place))
+        if not timetable_for_weekday:
+            return 'You are free for this day'
+        else:
+            return '\n'.join([' '.join(row) for row in timetable_for_weekday])
+
+    async def cmd_start(self, message: types.Message):
+        user_id = message.from_user.id
+        if not self._user_is_registered(user_id):
+            self.db.session.add(User(user_id))
+            self.db.session.commit()
+        await message.answer(f'Hello, {message.from_user.username}')
+
+    async def cmd_help(self, message: types.Message):
+        await message.answer(self.HELP_MESSAGE)
 
     async def cmd_today(self, message: types.Message):
-        day = datetime.date.today().weekday()
-        day = calendar.day_name[day]
-        records = get_timetable_for_group_and_day(self.cursor, 0, day)
-        reply_text = "\n".join(
-            [" | ".join(row) for row in records]
-        )
-        try:
-            await message.answer(reply_text)
-        except MessageTextIsEmpty:
-            await message.answer('You are free!')
+        user_id = message.from_user.id
+        if not self._user_is_registered(user_id):
+            await message.answer('You are not registered. Run /start to register')
+            return
+        weekday = calendar.day_name[datetime.datetime.today().weekday()]
+        await message.answer(self._get_timetable_for_day(user_id, weekday))
 
     async def cmd_weekday(self, message: types.Message):
-        day = message.get_command(pure=True)
-        records = get_timetable_for_group_and_day(self.cursor, 0, day)
-        reply_text = "\n".join(
-            [" | ".join(row) for row in records]
-        )
-        try:
-            await message.answer(reply_text)
-        except MessageTextIsEmpty:
-            await message.answer('You are free!')
-
-    async def cmd_upload_timetable(self, message: types.Message):
-        await UploadForm.upload_file.set()
-        await message.answer('Waiting for file')
+        user_id = message.from_user.id
+        if not self._user_is_registered(user_id):
+            await message.answer('You are not registered. Run /start to register')
+            return
+        weekday = message.get_command(pure=True).capitalize()
+        await message.answer(self._get_timetable_for_day(user_id, weekday))
 
     async def handle_file(self, message: types.Message):
-        await UploadForm.next()
+        user_id = message.from_user.id
+        if not self._user_is_registered(user_id):
+            await message.answer('You are not registered. Run /start to register')
+            return
         file_id = message.document.file_id
         root, ext = os.path.splitext(message.document.file_name)
         loader = get_loader(ext)
@@ -84,5 +97,14 @@ class TimeTableBot:
         else:
             tmp_file = 'tmp' + ext
             await self.bot.download_file_by_id(file_id, tmp_file)
-            upload_timetable_for_group(self.cursor, loader(path_to_file=tmp_file, group_id=0))
+            try:
+                new_records = [TimetableRecord(user_id=user_id, **record) for record in loader(tmp_file, self.scheme)]
+                self.db.session.query(TimetableRecord).filter_by(user_id=user_id).delete()
+                self.db.session.add_all(new_records)
+                self.db.session.commit()
+                await message.answer('Your timetable has been uploaded')
+            # TODO: Make exception handlers
+            except Exception:
+                self.db.session.rollback()
+                await message.answer('Something went wrong')
             os.remove(tmp_file)
